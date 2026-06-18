@@ -1,6 +1,6 @@
 {
   "name": "bun-install",
-  "version": "0.1.0",
+  "version": "0.1.1-0",
   "description": "Install command packages from a local Bun workspace into Bun's global package store.",
   "type": "module",
   "bin": {
