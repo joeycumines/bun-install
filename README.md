@@ -36,3 +36,21 @@ bun run check
 ```
 
 Use `bun run link` to link the package into Bun's global package store for local development.
+
+## Release
+
+```sh
+# bump version (pick one)
+bun run version:patch
+bun run version:minor
+bun run version:major
+bun run version:prerelease
+
+# publish (dry-run first, then latest or next)
+bun run publish:dry
+bun run publish:latest
+bun run publish:next
+
+# push the tag
+bun run release
+```

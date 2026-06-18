@@ -1,1 +1,1 @@
-module.exports = ['build/', 'coverage/']
+module.exports = ['build/', 'coverage/', 'bun.lock', '.claude/**'];

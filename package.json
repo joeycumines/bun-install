@@ -21,7 +21,14 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "bun run lint && bun run typecheck && bun run test",
-    "prepublishOnly": "bun run check"
+    "publish:dry": "bun run check && bun publish --dry-run",
+    "publish:next": "bun run check && bun publish --tag next",
+    "publish:latest": "bun run check && bun publish --tag latest",
+    "release": "bun run check && git push --follow-tags origin $(git branch --show-current)",
+    "version:patch": "bun run check && bun pm version patch",
+    "version:minor": "bun run check && bun pm version minor",
+    "version:major": "bun run check && bun pm version major",
+    "version:prerelease": "bun run check && bun pm version prerelease"
   },
   "keywords": [
     "bun",
