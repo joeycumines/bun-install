@@ -137,6 +137,107 @@ export function extractBinaries(pkgName: string, binField: unknown): string[] {
 }
 
 /**
+ * Type guard: true when `v` is a plain object suitable for `Object.keys` of
+ * dependency entries (i.e. a `Record<string, unknown>`). Guards against
+ * malformed `package.json` values like `"dependencies": "invalid"` (a string,
+ * whose `Object.keys` would yield character indices) or an array (whose
+ * `Object.keys` would yield numeric indices), both of which would silently
+ * pollute the dependency graph.
+ */
+export function isDependencyRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Escapes the special characters in a string for safe inclusion in a RegExp.
+ */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Returns true when a filesystem path references `name` as a complete path
+ * segment under `node_modules` or `install/global` — e.g.
+ * `.../node_modules/<name>/...`, `.../install/global/<name>/...`, or the same
+ * forms ending in `<name>`.
+ *
+ * Segment-based matching is used instead of `String.includes` so that a package
+ * named `foo` does NOT match `node_modules/foo-bar` (which a naive substring
+ * check would wrongly report as owned). Bun's real global-bin symlinks point to
+ * `.../install/global/node_modules/<name>/...`, which this also matches.
+ *
+ * Scoped package names (e.g. `@scope/cli`) span two path segments
+ * (`@scope`/`cli`), so `name` is split on separators and matched as a
+ * consecutive run of segments — this also keeps the boundary exact (so
+ * `@scope/cli` does not match `@scope/cli-other`).
+ */
+function segmentsMatchAt(
+  segments: string[],
+  start: number,
+  nameSegs: string[],
+): boolean {
+  for (let j = 0; j < nameSegs.length; j++) {
+    if (segments[start + j] !== nameSegs[j]) return false;
+  }
+  return true;
+}
+
+export function pathReferencesPackage(target: string, name: string): boolean {
+  const segments = target.split(/[/\\]/);
+  const nameSegs = name.split(/[/\\]/);
+  for (let i = 0; i < segments.length; i++) {
+    if (
+      segments[i] === 'node_modules' &&
+      segmentsMatchAt(segments, i + 1, nameSegs)
+    ) {
+      return true;
+    }
+    if (
+      segments[i] === 'install' &&
+      segments[i + 1] === 'global' &&
+      segmentsMatchAt(segments, i + 2, nameSegs)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Returns true when the textual content of a regular-file binary references
+ * package `name`. Uses regex matching with a trailing boundary that is not a
+ * valid package-name character, so `node_modules/foo` (followed by `/`, `"`,
+ * end-of-string, etc.) matches but `node_modules/foo-bar` does not. This is
+ * more permissive than {@link pathReferencesPackage} (which requires clean
+ * path segments) because content embeds package references inside quoted
+ * strings (e.g. `require("node_modules/foo/index.js")`), where `node_modules`
+ * is not a standalone segment.
+ *
+ * This is a heuristic for non-symlink binaries (e.g. JS shims). When ownership
+ * cannot be positively established, callers must NOT delete — see
+ * {@link verifyCommandsAbsent}.
+ */
+export function contentReferencesPackage(
+  content: string,
+  name: string,
+): boolean {
+  const esc = escapeRegExp(name);
+  // Negative lookahead: the match must NOT be followed by a character that is
+  // valid in a package name, preventing `foo` from matching `foo-bar`.
+  const boundary = '(?![a-z0-9._-])';
+  // Cross-platform path separator: matches `/` or `\` in the regex.
+  // While JS source almost universally uses forward slashes, some Windows
+  // shims or third-party tools may embed backslash paths.
+  const s = '[\\\\/]';
+  const patterns = [
+    `node_modules${s}${esc}${boundary}`,
+    `install${s}global${s}${esc}${boundary}`,
+    `@bun${s}${esc}${boundary}`,
+  ];
+  return patterns.some(p => new RegExp(p, 'i').test(content));
+}
+
+/**
  * Perform a topological sort (Kahn's Algorithm) on a subset of local packages.
  */
 export function topologicalSort(packages: Map<string, PackageData>): string[] {

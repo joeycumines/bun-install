@@ -1,35 +1,13 @@
-import {existsSync, readFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {readFileSync} from 'node:fs';
+import {dirname, resolve} from 'node:path';
 
 import type {PackageData} from './types.ts';
-import {die, extractBinaries, topologicalSort} from './utils.ts';
-
-/**
- * Traverses upwards from the script directory to find the monorepo root.
- * We identify the root by looking for a package.json with a "workspaces" field.
- */
-export function findWorkspaceRoot(startDir: string): string {
-  let current = startDir;
-  while (true) {
-    const pkgPath = join(current, 'package.json');
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-        if (pkg.workspaces) return current;
-      } catch {
-        console.warn(
-          'Ignoring unparseable package.json during workspace discovery',
-        );
-      }
-    }
-    const parent = dirname(current);
-    if (parent === current)
-      die(
-        "Could not auto-discover workspace root. No package.json with a 'workspaces' field found in any parent directory.",
-      );
-    current = parent;
-  }
-}
+import {
+  die,
+  extractBinaries,
+  isDependencyRecord,
+  topologicalSort,
+} from './utils.ts';
 
 /**
  * Resolves workspace glob patterns from the root package.json,
@@ -85,12 +63,52 @@ export function discoverWorkspacePackages(
         const pkgData = JSON.parse(readFileSync(absPath, 'utf-8'));
         if (!pkgData.name) continue;
 
-        // Only runtime deps (dependencies + peerDependencies) are needed for the
-        // install graph.  devDependencies are used during build but are not
-        // required at runtime by the globally-installed commands.
+        // Collect ALL dependency types for the BUILD GRAPH: dependencies,
+        // peerDependencies, devDependencies, and optionalDependencies.
+        // Workspace-local devDependencies / optionalDependencies may be build
+        // tools or build inputs that must be built before their dependents
+        // (e.g. a local shared-builder in devDependencies whose compiled
+        // output is imported during the dependent's build). Without them in
+        // localDeps the BFS in computeTopologicalOrder never reaches them.
+        // Registry deps are filtered out by the entry point's uniform
+        // `filter(dep => allPackagesMap.has(dep))` (src/index.ts). A Set
+        // deduplicates entries across dep fields (benign in Kahn's algorithm
+        // but cleaner). `isDependencyRecord` guards against malformed values
+        // (string/array) whose `Object.keys` would yield char/numeric indices.
+        //
+        // `runtimeLocalDeps` collects only RUNTIME deps (dependencies +
+        // peerDependencies + optionalDependencies, NOT devDependencies).
+        // Used by `computeInstallSet` to determine which packages need to be
+        // globally installed — devDep build tools are built but NOT installed.
         const allDeps = [
-          ...Object.keys(pkgData.dependencies ?? {}),
-          ...Object.keys(pkgData.peerDependencies ?? {}),
+          ...new Set<string>([
+            ...(isDependencyRecord(pkgData.dependencies)
+              ? Object.keys(pkgData.dependencies)
+              : []),
+            ...(isDependencyRecord(pkgData.peerDependencies)
+              ? Object.keys(pkgData.peerDependencies)
+              : []),
+            ...(isDependencyRecord(pkgData.devDependencies)
+              ? Object.keys(pkgData.devDependencies)
+              : []),
+            ...(isDependencyRecord(pkgData.optionalDependencies)
+              ? Object.keys(pkgData.optionalDependencies)
+              : []),
+          ]),
+        ];
+
+        const runtimeDeps = [
+          ...new Set<string>([
+            ...(isDependencyRecord(pkgData.dependencies)
+              ? Object.keys(pkgData.dependencies)
+              : []),
+            ...(isDependencyRecord(pkgData.peerDependencies)
+              ? Object.keys(pkgData.peerDependencies)
+              : []),
+            ...(isDependencyRecord(pkgData.optionalDependencies)
+              ? Object.keys(pkgData.optionalDependencies)
+              : []),
+          ]),
         ];
 
         if (allPackagesMap.has(pkgData.name)) {
@@ -104,6 +122,7 @@ export function discoverWorkspacePackages(
           dir: pkgDir,
           bins: extractBinaries(pkgData.name, pkgData.bin),
           localDeps: allDeps,
+          runtimeLocalDeps: runtimeDeps,
           hasBuildScript: !!pkgData.scripts?.build,
         });
       } catch {
@@ -150,7 +169,7 @@ export function computeTopologicalOrder(
   for (const cmd of targetCommands) {
     const pkgName = commandToPackage.get(cmd);
     if (!pkgName)
-      die(`Requested command '${cmd}' was not found in any workspace package.`);
+      die(`Requested command '${cmd}' was not found in any local package.`);
     entryPackages.add(pkgName);
   }
 
@@ -174,4 +193,50 @@ export function computeTopologicalOrder(
   }
 
   return topologicalSort(prunedPackagesMap);
+}
+
+/**
+ * Computes the set of packages that should be GLOBALLY INSTALLED, by
+ * performing a BFS from the requested commands' owning packages following
+ * ONLY runtime dependencies (`runtimeLocalDeps` — dependencies,
+ * peerDependencies, and optionalDependencies, EXCLUDING devDependencies).
+ *
+ * This is the install-side counterpart to {@link computeTopologicalOrder}
+ * (which follows `localDeps` — all 4 dep types — for the build graph). The
+ * build graph includes devDep build tools so they are built before their
+ * dependents; the install set EXCLUDES them so they are not globally
+ * installed as commands (even if they have a `bin` field).
+ *
+ * The caller filters the build topological order by this set to produce
+ * `installOrder` — preserving topological order for the install subset.
+ *
+ * @returns the set of package names to globally install.
+ */
+export function computeInstallSet(
+  targetCommands: string[],
+  allPackagesMap: Map<string, PackageData>,
+  commandToPackage: Map<string, string>,
+): Set<string> {
+  const entryPackages = new Set<string>();
+  for (const cmd of targetCommands) {
+    const pkgName = commandToPackage.get(cmd);
+    if (!pkgName)
+      die(`Requested command '${cmd}' was not found in any local package.`);
+    entryPackages.add(pkgName);
+  }
+
+  const installSet = new Set<string>();
+  const bfsQueue = Array.from(entryPackages);
+
+  while (bfsQueue.length > 0) {
+    const current = bfsQueue.shift();
+    if (current === undefined) break;
+    if (!installSet.has(current)) {
+      installSet.add(current);
+      const pkgData = allPackagesMap.get(current);
+      if (pkgData) bfsQueue.push(...pkgData.runtimeLocalDeps);
+    }
+  }
+
+  return installSet;
 }
