@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import {randomUUID} from 'node:crypto';
 import {mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -14,7 +15,7 @@ import {
   installPackages,
   verifyCommandsPresent,
 } from './operations.ts';
-import {die, ensureBunBinInPath, log} from './utils.ts';
+import {die, ensureBunBinInPath, log, parseArgs} from './utils.ts';
 import {
   buildCommandToPackageMap,
   computeTopologicalOrder,
@@ -22,11 +23,46 @@ import {
 } from './workspace.ts';
 
 /**
+ * Usage text printed when --help is passed.
+ */
+const USAGE_TEXT = `bun-install — globally install CLI commands from a local Bun project
+
+USAGE:
+  bun-install [OPTIONS] [COMMAND ...]
+
+OPTIONS:
+  --bun       Rewrite node shebangs to 'bun' and inject a Bun shebang when
+              a bin target has none. Works cross-platform: on Unix the OS
+              reads the shebang via the symlink; on Windows Bun's shim reads
+              it from the target file.
+  --help, -h  Show this help message and exit
+
+COMMANDS:
+  Zero or more command names to install. If omitted, all commands from the
+  project are installed.
+
+EXAMPLES:
+  bun-install                        Install all commands from the project
+  bun-install my-cli                 Install only 'my-cli'
+  bun-install --bun                  Install all commands, running under Bun
+  bun-install --bun my-cli other     Install specific commands under Bun
+  bun-install -- --weird-name        Install a command starting with dashes`;
+
+/**
  * Entry point: discovers the caller's project (workspace or single-package),
  * prunes the graph to the requested commands, builds and packs the required
  * packages, then installs them globally and verifies the resulting binaries.
  */
 function main(): void {
+  // Parse CLI flags (--bun, --help) and separate them from positional
+  // command names. Unknown flags are a fatal error (fail-fast).
+  const cli = parseArgs(process.argv.slice(2));
+
+  if (cli.flags.help) {
+    console.log(USAGE_TEXT);
+    process.exit(0);
+  }
+
   // Resolve the project — supports both monorepo workspaces and single-package
   // projects that have no "workspaces" field in their package.json.
   let rootDir: string;
@@ -85,7 +121,7 @@ function main(): void {
     );
   }
 
-  const requestedCommands = process.argv.slice(2);
+  const requestedCommands = cli.commands;
   const targetCommands =
     requestedCommands.length > 0
       ? requestedCommands
@@ -141,6 +177,7 @@ function main(): void {
       allPackagesMap,
       archiveStoreDir,
       tmpDir,
+      {bun: cli.flags.bun},
     );
     uninstallOldGlobals(installOrder);
 
@@ -149,7 +186,7 @@ function main(): void {
     // dependencies must also be checked to prevent collisions.
     const installBins = installOrder.flatMap(pkgName => {
       const pkg = allPackagesMap.get(pkgName);
-      return pkg ? pkg.bins : [];
+      return pkg ? pkg.binEntries.map(e => e.name) : [];
     });
 
     verifyCommandsAbsent(installBins, bunBinDir, installOrder);

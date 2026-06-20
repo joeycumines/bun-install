@@ -13,6 +13,7 @@ import {
 import {dirname, join, relative, resolve, sep} from 'node:path';
 
 import {moveIntoStore} from './archive.ts';
+import {rewriteShebangs} from './shebang.ts';
 import type {PackageData} from './types.ts';
 import {EXIT_SIGNALS} from './types.ts';
 import {
@@ -421,6 +422,7 @@ export function buildAndPackPackages(
   packagesMap: Map<string, PackageData>,
   archiveStoreDir: string,
   tmpDir: string,
+  opts?: {bun?: boolean},
 ): void {
   log('\nBuilding and Packaging required modules...');
   for (const pkgName of topoOrder) {
@@ -474,6 +476,19 @@ export function buildAndPackPackages(
       if (pinned) log('  Pinned workspace dependencies to local tarballs');
       if (stripped)
         log('  Stripped devDependencies (not needed for global install)');
+    }
+
+    // --bun: Rewrite shebangs in bin target files BEFORE packing so the
+    // modified shebangs flow into the tarball. The throwaway copy (packDir)
+    // is the staging ground, and `bun pm pack` seals the modifications into
+    // the archive. After `bun add -g` installs the archive, the installed bin
+    // target files have `#!/usr/bin/env bun` shebangs. On Unix, the OS reads
+    // the shebang via the symlink. On Windows, Bun's .exe shim reads the
+    // shebang from the target file. Files that cannot be safely rewritten
+    // (binaries, non-node shebangs) are skipped with a warning.
+    if (opts?.bun) {
+      log('  --bun: rewriting shebangs in bin targets...');
+      rewriteShebangs(packDir, pkg.binEntries);
     }
 
     log(`Packing ${pkgName}...`);

@@ -435,7 +435,7 @@ describe('computeInstallSet — build vs. install decoupling (review-08 #1)', ()
     // builder-cli's bin ('buildcmd') is NOT in installBins.
     const installBins = installOrder.flatMap(pkgName => {
       const pkg = packages.get(pkgName);
-      return pkg ? pkg.bins : [];
+      return pkg ? pkg.binEntries.map(e => e.name) : [];
     });
     expect(installBins).not.toContain('buildcmd');
     expect(installBins).toContain('myapp');

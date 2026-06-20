@@ -9,9 +9,24 @@ It handles dependency ordering, cache management, and binary verification.
 
 ## Install
 
+### From NPM
+
 ```sh
 bun add -g bun-install
 ```
+
+### From source
+
+Clone the repo and run the entrypoint directly:
+
+```sh
+git clone https://github.com/joeycumines/bun-install.git
+cd bun-install
+bun src/index.ts
+```
+
+This installs `bun-install` into Bun's global package store just as the
+published package would.
 
 ## Usage
 
@@ -25,6 +40,26 @@ Install only selected commands (by binary name):
 
 ```sh
 bun-install my-command another-command
+```
+
+Force the Bun runtime (equivalent to `bunx --bun`):
+
+```sh
+bun-install --bun
+bun-install --bun my-command
+```
+
+The `--bun` flag rewrites node shebangs in the installed commands to
+`#!/usr/bin/env bun` and injects a Bun shebang when a bin target has none, so
+they run under the Bun runtime instead of Node.js. This works cross-platform:
+on Unix the OS reads the shebang via the symlink; on Windows Bun's shim reads
+it from the target file. Files that cannot be safely rewritten (native
+binaries, non-node scripts) are skipped with a warning — the install proceeds.
+
+Show help:
+
+```sh
+bun-install --help
 ```
 
 ### Project types
@@ -53,8 +88,6 @@ Discovery walks upwards from your current directory, so you can run
 bun install
 bun run check
 ```
-
-Use `bun src/index.ts` to install a copy of this command into Bun's global package store via the command itself.
 
 ## Release
 

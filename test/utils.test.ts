@@ -1,9 +1,14 @@
 import {describe, expect, test} from 'bun:test';
+import {writeFileSync, rmSync} from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {randomUUID} from 'node:crypto';
 
 import {
   pathReferencesPackage,
   contentReferencesPackage,
   isDependencyRecord,
+  parseArgs,
 } from '../src/utils.ts';
 
 // --------------------------------------------------------------------------
@@ -165,5 +170,136 @@ describe('isDependencyRecord', () => {
   test('rejects null and undefined', () => {
     expect(isDependencyRecord(null)).toBe(false);
     expect(isDependencyRecord(undefined)).toBe(false);
+  });
+});
+
+// --------------------------------------------------------------------------
+// parseArgs
+// --------------------------------------------------------------------------
+
+describe('parseArgs', () => {
+  test('parses --bun flag', () => {
+    const {flags, commands} = parseArgs(['--bun', 'my-cli']);
+    expect(flags.bun).toBe(true);
+    expect(flags.help).toBe(false);
+    expect(commands).toEqual(['my-cli']);
+  });
+
+  test('parses --help flag', () => {
+    const {flags, commands} = parseArgs(['--help']);
+    expect(flags.help).toBe(true);
+    expect(flags.bun).toBe(false);
+    expect(commands).toEqual([]);
+  });
+
+  test('parses -h shorthand', () => {
+    const {flags} = parseArgs(['-h']);
+    expect(flags.help).toBe(true);
+  });
+
+  test('no flags → all positional', () => {
+    const {flags, commands} = parseArgs(['my-cli', 'other']);
+    expect(flags.bun).toBe(false);
+    expect(flags.help).toBe(false);
+    expect(commands).toEqual(['my-cli', 'other']);
+  });
+
+  test('-- separator passes subsequent args as positional', () => {
+    const {flags, commands} = parseArgs(['--bun', '--', '--weird-cmd']);
+    expect(flags.bun).toBe(true);
+    expect(commands).toEqual(['--weird-cmd']);
+  });
+
+  test('multiple args after -- are all positional', () => {
+    const {commands} = parseArgs(['--', '--first', '--second', 'normal']);
+    expect(commands).toEqual(['--first', '--second', 'normal']);
+  });
+
+  test('mixed flags and commands', () => {
+    const {flags, commands} = parseArgs(['my-cli', '--bun', 'other']);
+    expect(flags.bun).toBe(true);
+    expect(commands).toEqual(['my-cli', 'other']);
+  });
+
+  test('single dash (-) is treated as a positional argument (POSIX/GNU)', () => {
+    // A single '-' is commonly used to mean stdin. It must NOT be treated
+    // as an unknown flag. This is the POSIX/GNU convention that
+    // util.parseArgs handles correctly.
+    const {flags, commands} = parseArgs(['-']);
+    expect(flags.bun).toBe(false);
+    expect(flags.help).toBe(false);
+    expect(commands).toEqual(['-']);
+  });
+
+  test('single dash among other args', () => {
+    const {flags, commands} = parseArgs(['--bun', '-', 'my-cli']);
+    expect(flags.bun).toBe(true);
+    expect(commands).toEqual(['-', 'my-cli']);
+  });
+
+  test('empty argv → no flags, no commands', () => {
+    const {flags, commands} = parseArgs([]);
+    expect(flags.bun).toBe(false);
+    expect(flags.help).toBe(false);
+    expect(commands).toEqual([]);
+  });
+
+  test('--bun can appear multiple times (idempotent)', () => {
+    const {flags} = parseArgs(['--bun', '--bun']);
+    expect(flags.bun).toBe(true);
+  });
+});
+
+// --------------------------------------------------------------------------
+// parseArgs — die path (unknown flag)
+// --------------------------------------------------------------------------
+
+const UTILS_MODULE = join(import.meta.dir, '..', 'src', 'utils.ts');
+
+/**
+ * Runs a small TypeScript snippet in a child Bun process that imports
+ * parseArgs from the real utils module. Used to assert the die path exits
+ * non-zero. Same pattern as test/operations.test.ts runIsolated.
+ */
+function runIsolated(body: string): {code: number; stderr: string} {
+  const file = join(tmpdir(), `bun-install-args-${randomUUID()}.ts`);
+  writeFileSync(
+    file,
+    `import {parseArgs} from ${JSON.stringify(UTILS_MODULE)};\n${body}`,
+  );
+  try {
+    const proc = Bun.spawnSync(['bun', file], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: process.env as Record<string, string>,
+    });
+    return {
+      code: proc.exitCode ?? -1,
+      stderr: new TextDecoder().decode(proc.stderr),
+    };
+  } finally {
+    rmSync(file, {force: true});
+  }
+}
+
+describe('parseArgs — die path (unknown flag)', () => {
+  test('dies on unknown --flag', () => {
+    const {code, stderr} = runIsolated("parseArgs(['--unknown']);\n");
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/Unknown option/i);
+    expect(stderr).toMatch(/Supported flags/i);
+  });
+
+  test('dies on unknown short flag -x', () => {
+    const {code, stderr} = runIsolated("parseArgs(['-x']);\n");
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/Unknown option|ERR_PARSE_ARGS/i);
+  });
+
+  test('does NOT die on -- separator', () => {
+    const {code} = runIsolated(
+      "const r = parseArgs(['--', '--unknown']);\n" +
+        "if (r.commands[0] !== '--unknown') throw new Error('fail');\n",
+    );
+    expect(code).toBe(0);
   });
 });

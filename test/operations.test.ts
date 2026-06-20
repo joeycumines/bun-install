@@ -207,7 +207,7 @@ function packedSibling(name: string, archivePath: string): PackageData {
   return {
     name,
     dir: '/dev/null',
-    bins: [],
+    binEntries: [],
     localDeps: [],
     runtimeLocalDeps: [],
     hasBuildScript: false,
@@ -386,7 +386,7 @@ describe('pinWorkspaceDeps — die paths', () => {
   test('dies loudly when a local sibling has no archive path', () => {
     const {code, stderr} = runIsolated(
       'const m = new Map();\n' +
-        "m.set('lib', {name:'lib',dir:'/x',bins:[],localDeps:[],runtimeLocalDeps:[],hasBuildScript:false});\n" +
+        "m.set('lib', {name:'lib',dir:'/x',binEntries:[],localDeps:[],runtimeLocalDeps:[],hasBuildScript:false});\n" +
         "pinWorkspaceDeps({dependencies:{lib:'^1.5.0'}}, m, 'cli');\n",
     );
     expect(code).toBe(1);

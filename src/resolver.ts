@@ -2,7 +2,7 @@ import {existsSync, readFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 
 import type {PackageData, ResolvedProject} from './types.ts';
-import {extractBinaries, isDependencyRecord} from './utils.ts';
+import {extractBinEntries, isDependencyRecord} from './utils.ts';
 import {resolveWorkspaceGlobs, discoverWorkspacePackages} from './workspace.ts';
 
 // ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ function resolveSinglePackage(
   }
 
   const scripts = rootPkg.scripts as Record<string, unknown> | undefined;
-  const bins = extractBinaries(pkgName, rootPkg.bin);
+  const binEntries = extractBinEntries(pkgName, rootPkg.bin);
 
   // Collect dependency names for the BUILD GRAPH: dependencies,
   // peerDependencies, devDependencies, and optionalDependencies.
@@ -255,7 +255,7 @@ function resolveSinglePackage(
   //
   // `localDeps` here is the full dependency name list (registry + any local
   // siblings), intentionally NOT pre-filtered to local siblings. In
-  // single-package mode there are no siblings, so the index.ts filter yields
+  // single-package mode there are no siblings, so the src/index.ts filter yields
   // []. `isDependencyRecord` guards against malformed values (e.g. a string
   // or array) whose `Object.keys` would yield character/numeric indices and
   // pollute the dependency graph. A Set deduplicates entries (a package
@@ -293,7 +293,7 @@ function resolveSinglePackage(
   packages.set(pkgName, {
     name: pkgName,
     dir: rootDir,
-    bins,
+    binEntries,
     localDeps: allDeps,
     runtimeLocalDeps: runtimeDeps,
     hasBuildScript: !!scripts?.build,

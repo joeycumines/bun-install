@@ -60,7 +60,7 @@ describe('resolveProject — single-package mode', () => {
     expect(pkg.name).toBe('my-cli');
     expect(pkg.dir).toBe(root);
     // String bin → binary name equals package name
-    expect(pkg.bins).toEqual(['my-cli']);
+    expect(pkg.binEntries.map(e => e.name)).toEqual(['my-cli']);
     expect(pkg.hasBuildScript).toBe(false);
     expect(pkg.localDeps).toEqual([]);
   });
@@ -77,7 +77,7 @@ describe('resolveProject — single-package mode', () => {
 
     expect(pkg.name).toBe('toolbox');
     expect(pkg.dir).toBe(root);
-    expect(pkg.bins).toEqual(['tool', 'helper']);
+    expect(pkg.binEntries.map(e => e.name)).toEqual(['tool', 'helper']);
   });
 
   test('detects build script', () => {
@@ -175,7 +175,7 @@ describe('resolveProject — single-package mode', () => {
 
     const {packages} = resolveProject(root);
     const pkg = packages.get('devdep-cli')!;
-    // All four dep types are collected (before the index.ts local-sibling filter).
+    // All four dep types are collected (before the src/index.ts local-sibling filter).
     expect(pkg.localDeps.sort()).toEqual(['express', 'fsevents', 'typescript']);
   });
 
@@ -202,7 +202,7 @@ describe('resolveProject — single-package mode', () => {
 
     const {packages} = resolveProject(root);
     const pkg = packages.get('lib-only')!;
-    expect(pkg.bins).toEqual([]);
+    expect(pkg.binEntries).toEqual([]);
   });
 
   test('returns rootPkgName for project ID derivation', () => {
@@ -274,7 +274,9 @@ describe('resolveProject — workspace mode', () => {
     expect(project.rootPkgName).toBe('monorepo-root');
     expect(project.packages.size).toBe(1);
     expect(project.packages.has('lib')).toBe(true);
-    expect(project.packages.get('lib')!.bins).toEqual(['lib']);
+    expect(project.packages.get('lib')!.binEntries.map(e => e.name)).toEqual([
+      'lib',
+    ]);
   });
 
   test('throws ResolverError when workspace globs match nothing', () => {
@@ -288,7 +290,7 @@ describe('resolveProject — workspace mode', () => {
     expect(() => resolveProject(root)).toThrow(/No packages found/);
     // R9-4: the error message must NOT mention "bin" — discoverWorkspacePackages
     // adds packages with a "name" regardless of "bin". The "no bins" check is
-    // in index.ts (commandToPackage.size === 0), not here.
+    // in src/index.ts (commandToPackage.size === 0), not here.
     expect(() => resolveProject(root)).not.toThrow(/bin/);
   });
 });
@@ -318,7 +320,7 @@ describe('resolveProject — cross-mode consistency', () => {
     const wsPkg = wsProj.packages.get('single')!;
 
     expect(singlePkg.name).toBe(wsPkg.name);
-    expect(singlePkg.bins).toEqual(wsPkg.bins);
+    expect(singlePkg.binEntries).toEqual(wsPkg.binEntries);
     expect(typeof singlePkg.dir).toBe('string');
     expect(typeof wsPkg.dir).toBe('string');
     expect(singlePkg.hasBuildScript).toBe(false);

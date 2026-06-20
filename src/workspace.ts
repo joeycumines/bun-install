@@ -4,7 +4,7 @@ import {dirname, resolve} from 'node:path';
 import type {PackageData} from './types.ts';
 import {
   die,
-  extractBinaries,
+  extractBinEntries,
   isDependencyRecord,
   topologicalSort,
 } from './utils.ts';
@@ -120,7 +120,7 @@ export function discoverWorkspacePackages(
         allPackagesMap.set(pkgData.name, {
           name: pkgData.name,
           dir: pkgDir,
-          bins: extractBinaries(pkgData.name, pkgData.bin),
+          binEntries: extractBinEntries(pkgData.name, pkgData.bin),
           localDeps: allDeps,
           runtimeLocalDeps: runtimeDeps,
           hasBuildScript: !!pkgData.scripts?.build,
@@ -143,13 +143,13 @@ export function buildCommandToPackageMap(
 ): Map<string, string> {
   const commandToPackage = new Map<string, string>();
   for (const [pkgName, pkg] of allPackagesMap.entries()) {
-    for (const bin of pkg.bins) {
-      if (commandToPackage.has(bin)) {
+    for (const entry of pkg.binEntries) {
+      if (commandToPackage.has(entry.name)) {
         die(
-          `Command '${bin}' is defined by both '${commandToPackage.get(bin)}' and '${pkgName}'. Resolve the collision before installing.`,
+          `Command '${entry.name}' is defined by both '${commandToPackage.get(entry.name)}' and '${pkgName}'. Resolve the collision before installing.`,
         );
       }
-      commandToPackage.set(bin, pkgName);
+      commandToPackage.set(entry.name, pkgName);
     }
   }
   return commandToPackage;
