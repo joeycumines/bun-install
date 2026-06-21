@@ -136,13 +136,26 @@ export function discoverWorkspacePackages(
 
 /**
  * Builds a map from binary/command name to the workspace package that provides it.
- * Warns when a command name is defined by multiple packages.
+ * Dies when a command name is defined by multiple packages (collision).
+ *
+ * @param allPackagesMap All discovered packages.
+ * @param restrictTo When provided, only packages whose name is in this set are
+ *   included in the map. Packages outside the set are skipped entirely — their
+ *   commands are not mapped and cannot trigger a collision die. This is used by
+ *   the `--package` flag to scope collision detection to the selected package's
+ *   install closure, preventing false dies from unrelated workspace packages
+ *   that happen to share a command name. Collisions WITHIN the restricted set
+ *   are still fatal (both packages would be installed and their bins would
+ *   clobber). When `undefined` (the default), ALL packages are included —
+ *   backward compatible with callers that do not pass this parameter.
  */
 export function buildCommandToPackageMap(
   allPackagesMap: Map<string, PackageData>,
+  restrictTo?: Set<string>,
 ): Map<string, string> {
   const commandToPackage = new Map<string, string>();
   for (const [pkgName, pkg] of allPackagesMap.entries()) {
+    if (restrictTo && !restrictTo.has(pkgName)) continue;
     for (const entry of pkg.binEntries) {
       if (commandToPackage.has(entry.name)) {
         die(
@@ -239,4 +252,47 @@ export function computeInstallSet(
   }
 
   return installSet;
+}
+
+/**
+ * Computes the set of packages that would be GLOBALLY INSTALLED if `<pkgName>`
+ * were selected, by performing a BFS from `<pkgName>` following ONLY
+ * `runtimeLocalDeps` (dependencies, peerDependencies, optionalDependencies —
+ * NOT devDependencies).
+ *
+ * This is used by the `--package` flag to scope `buildCommandToPackageMap`'s
+ * collision detection to only packages that will actually be installed. Without
+ * this scoping, a collision between the selected package and an UNRELATED
+ * workspace package (one not in the install closure) would cause a false die —
+ * even though the unrelated package is never installed.
+ *
+ * Follows `runtimeLocalDeps` (not `localDeps`) because dev-only build tools are
+ * built but NOT globally installed — their bins cannot clobber and therefore
+ * should not participate in collision detection.
+ *
+ * **Precondition:** `runtimeLocalDeps` on each package must already be filtered
+ * to local siblings (the caller's responsibility — done in `src/index.ts` before
+ * this function is called). Registry deps are already excluded by that filter.
+ *
+ * @returns The set of package names in the install closure (the package itself
+ *   plus all transitively reachable runtime-local siblings).
+ */
+export function computeInstallClosure(
+  allPackagesMap: Map<string, PackageData>,
+  pkgName: string,
+): Set<string> {
+  const closure = new Set<string>();
+  const bfsQueue = [pkgName];
+
+  while (bfsQueue.length > 0) {
+    const current = bfsQueue.shift();
+    if (current === undefined) break;
+    if (!closure.has(current)) {
+      closure.add(current);
+      const pkgData = allPackagesMap.get(current);
+      if (pkgData) bfsQueue.push(...pkgData.runtimeLocalDeps);
+    }
+  }
+
+  return closure;
 }

@@ -14,7 +14,7 @@ import {dirname, join, relative, resolve, sep} from 'node:path';
 
 import {moveIntoStore} from './archive.ts';
 import {rewriteShebangs} from './shebang.ts';
-import type {PackageData} from './types.ts';
+import type {PackageData, BinEntry} from './types.ts';
 import {EXIT_SIGNALS} from './types.ts';
 import {
   contentReferencesPackage,
@@ -398,6 +398,52 @@ export function stripDevDependencies(
 }
 
 /**
+ * Rewrites the `bin` field in a parsed package.json (the throwaway copy's) to
+ * include ONLY the selected bin entries.
+ *
+ * This is called when `--package` selects a subset of a package's commands.
+ * Without this filtering, `bun add -g` would symlink ALL of the package's bin
+ * entries — clobbering any existing command with the same name from a
+ * different package. Bun's `bun add -g` deletes and recreates symlinks on
+ * EEXIST without warning (per Bun source: `src/install/bin.zig`
+ * `createSymlink()`), so filtering the `bin` field in the packed tarball is
+ * the ONLY way to prevent clobbering of unselected commands.
+ *
+ * The `bin` field is reconstructed as an object `{name: path}` for each
+ * selected entry. This is semantically equivalent to the original form (string
+ * or object) — `bun add -g` handles both identically (string form is sugar for
+ * `{"<packageName>": "<path>"}`; see `extractBinEntries` in `utils.ts` for the
+ * inverse derivation).
+ *
+ * @param pkgJson The parsed package.json (mutated in place).
+ * @param selectedEntries The bin entries to retain (a subset of the package's
+ *   full `binEntries`). When empty, the `bin` field is deleted entirely.
+ * @returns `true` if the `bin` field was modified, `false` if no change was
+ *   needed (empty selection with no existing `bin` field).
+ */
+export function filterBinField(
+  pkgJson: Record<string, unknown>,
+  selectedEntries: BinEntry[],
+): boolean {
+  if (selectedEntries.length === 0) {
+    if ('bin' in pkgJson) {
+      delete pkgJson.bin;
+      return true;
+    }
+    return false;
+  }
+
+  // Reconstruct as object form. This is always semantically correct —
+  // bun add -g treats string and object forms identically.
+  const newBin: Record<string, string> = {};
+  for (const entry of selectedEntries) {
+    newBin[entry.name] = entry.path;
+  }
+  pkgJson.bin = newBin;
+  return true;
+}
+
+/**
  * Iterates the topologically-sorted packages, conditionally runs `bun run build`,
  * packs each INSTALL-SET package, and moves the resulting tarball into the
  * persistent archive store.
@@ -415,6 +461,14 @@ export function stripDevDependencies(
  * runtime dependencies are pinned to `file:<archive>` (via
  * {@link pinWorkspaceDeps}). Stripping devDeps prevents unresolvable
  * `workspace:*` specs from being baked into the tarball.
+ *
+ * When `opts.selectedBins` maps a package to a subset of its `binEntries`,
+ * the throwaway copy's `package.json` `bin` field is filtered (via
+ * {@link filterBinField}) to include only the selected commands BEFORE
+ * packing. This ensures `bun add -g` only symlinks the selected commands,
+ * preventing clobbering of existing commands from other packages. Shebang
+ * rewriting (when `opts.bun` is also set) is applied only to the selected
+ * bin target files.
  */
 export function buildAndPackPackages(
   topoOrder: string[],
@@ -422,7 +476,7 @@ export function buildAndPackPackages(
   packagesMap: Map<string, PackageData>,
   archiveStoreDir: string,
   tmpDir: string,
-  opts?: {bun?: boolean},
+  opts?: {bun?: boolean; selectedBins?: Map<string, BinEntry[]>},
 ): void {
   log('\nBuilding and Packaging required modules...');
   for (const pkgName of topoOrder) {
@@ -452,10 +506,15 @@ export function buildAndPackPackages(
     // The copy filter excludes nested `node_modules` directories *inside* the
     // package, computed relative to pkg.dir so that a host path whose absolute
     // form contains a `node_modules` segment does not blackhole the whole copy.
+    //
+    // NPM-fetched packages (isNpmFetched: true) are an exception: their nested
+    // `node_modules` may contain bundled dependencies or vendored payloads that
+    // are part of the published tarball. Stripping them would corrupt the
+    // package. The filter is skipped for these packages — everything is copied.
     const packDir = join(tmpDir, randomUUID());
     cpSync(pkg.dir, packDir, {
       recursive: true,
-      filter: makeCopyFilter(pkg.dir),
+      filter: pkg.isNpmFetched ? undefined : makeCopyFilter(pkg.dir),
     });
 
     // Strip devDependencies from the throwaway copy. `bun add -g` skips them
@@ -471,24 +530,38 @@ export function buildAndPackPackages(
     // points to local snapshots instead of the registry.
     const pinned = pinWorkspaceDeps(pkgJson, packagesMap, pkgName);
 
-    if (pinned || stripped) {
+    // Filter the bin field to only selected commands when --package selects
+    // a subset. This prevents bun add -g from symlinking unselected commands
+    // (which would clobber existing commands from other packages — Bun's
+    // bun add -g deletes and recreates symlinks on EEXIST without warning).
+    const selectedEntries = opts?.selectedBins?.get(pkgName) ?? pkg.binEntries;
+    const filteredBin =
+      selectedEntries.length < pkg.binEntries.length
+        ? filterBinField(pkgJson, selectedEntries)
+        : false;
+
+    if (pinned || stripped || filteredBin) {
       writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2) + '\n');
       if (pinned) log('  Pinned workspace dependencies to local tarballs');
       if (stripped)
         log('  Stripped devDependencies (not needed for global install)');
+      if (filteredBin)
+        log(
+          `  Filtered bin to selected commands: ${selectedEntries.map(e => e.name).join(', ')}`,
+        );
     }
 
-    // --bun: Rewrite shebangs in bin target files BEFORE packing so the
-    // modified shebangs flow into the tarball. The throwaway copy (packDir)
-    // is the staging ground, and `bun pm pack` seals the modifications into
-    // the archive. After `bun add -g` installs the archive, the installed bin
-    // target files have `#!/usr/bin/env bun` shebangs. On Unix, the OS reads
-    // the shebang via the symlink. On Windows, Bun's .exe shim reads the
-    // shebang from the target file. Files that cannot be safely rewritten
-    // (binaries, non-node shebangs) are skipped with a warning.
+    // --bun: Rewrite shebangs in the SELECTED bin target files BEFORE packing
+    // so the modified shebangs flow into the tarball. The throwaway copy
+    // (packDir) is the staging ground, and `bun pm pack` seals the
+    // modifications into the archive. After `bun add -g` installs the archive,
+    // the installed bin target files have `#!/usr/bin/env bun` shebangs. On
+    // Unix, the OS reads the shebang via the symlink. On Windows, Bun's .exe
+    // shim reads the shebang from the target file. Files that cannot be safely
+    // rewritten (binaries, non-node shebangs) are skipped with a warning.
     if (opts?.bun) {
       log('  --bun: rewriting shebangs in bin targets...');
-      rewriteShebangs(packDir, pkg.binEntries);
+      rewriteShebangs(packDir, selectedEntries);
     }
 
     log(`Packing ${pkgName}...`);

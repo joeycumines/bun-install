@@ -3,7 +3,11 @@ import {mkdtempSync, mkdirSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
-import {resolveProject, ResolverError} from '../src/resolver.ts';
+import {
+  resolveProject,
+  ResolverError,
+  NoProjectError,
+} from '../src/resolver.ts';
 
 // --------------------------------------------------------------------------
 // Fixture helpers
@@ -223,6 +227,8 @@ describe('resolveProject — single-package mode', () => {
 
     expect(() => resolveProject(root)).toThrow(ResolverError);
     expect(() => resolveProject(root)).toThrow(/must have a "name"/);
+    // Missing name is a BROKEN project, not a missing one.
+    expect(() => resolveProject(root)).not.toThrow(NoProjectError);
   });
 
   test('throws ResolverError when package.json name is empty string', () => {
@@ -238,6 +244,8 @@ describe('resolveProject — single-package mode', () => {
     // No package.json written
     expect(() => resolveProject(root)).toThrow(ResolverError);
     expect(() => resolveProject(root)).toThrow(/No package\.json found/);
+    // Specifically throws NoProjectError (subclass of ResolverError).
+    expect(() => resolveProject(root)).toThrow(NoProjectError);
   });
 
   test('throws ResolverError when package.json is malformed JSON', () => {
@@ -246,6 +254,9 @@ describe('resolveProject — single-package mode', () => {
 
     expect(() => resolveProject(root)).toThrow(ResolverError);
     expect(() => resolveProject(root)).toThrow(/could not be parsed/);
+    // Malformed package.json is a BROKEN project, not a missing one.
+    // It throws a plain ResolverError, NOT NoProjectError.
+    expect(() => resolveProject(root)).not.toThrow(NoProjectError);
   });
 });
 
@@ -292,6 +303,8 @@ describe('resolveProject — workspace mode', () => {
     // adds packages with a "name" regardless of "bin". The "no bins" check is
     // in src/index.ts (commandToPackage.size === 0), not here.
     expect(() => resolveProject(root)).not.toThrow(/bin/);
+    // Empty workspace is a BROKEN project, not a missing one.
+    expect(() => resolveProject(root)).not.toThrow(NoProjectError);
   });
 });
 
@@ -449,5 +462,43 @@ describe('resolveProject — dependency field type validation', () => {
     const {packages} = resolveProject(root);
     const pkg = packages.get('good-deps-cli')!;
     expect(pkg.localDeps).toEqual(['lodash']);
+  });
+});
+
+// --------------------------------------------------------------------------
+// NoProjectError — subclass hierarchy and discriminability (review-071e6d2 #1)
+// --------------------------------------------------------------------------
+
+describe('NoProjectError — subclass hierarchy', () => {
+  test('NoProjectError extends ResolverError extends Error', () => {
+    const err = new NoProjectError('test');
+    expect(err instanceof NoProjectError).toBe(true);
+    expect(err instanceof ResolverError).toBe(true);
+    expect(err instanceof Error).toBe(true);
+  });
+
+  test('NoProjectError has name property set to "NoProjectError"', () => {
+    const err = new NoProjectError('test');
+    expect(err.name).toBe('NoProjectError');
+  });
+
+  test('ResolverError has name property set to "ResolverError" (not NoProjectError)', () => {
+    const err = new ResolverError('test');
+    expect(err.name).toBe('ResolverError');
+    expect(err instanceof NoProjectError).toBe(false);
+  });
+
+  test('a plain ResolverError is NOT an instance of NoProjectError', () => {
+    // This is the critical discriminability test: callers in index.ts check
+    // `instanceof NoProjectError` BEFORE `instanceof ResolverError` to
+    // distinguish "no project" (NPM fallback) from "broken project" (fatal).
+    const brokenProjectError = new ResolverError('malformed package.json');
+    expect(brokenProjectError instanceof NoProjectError).toBe(false);
+    expect(brokenProjectError instanceof ResolverError).toBe(true);
+
+    const noProjectError = new NoProjectError('no package.json');
+    // NoProjectError IS a ResolverError (subclass), so both match.
+    expect(noProjectError instanceof NoProjectError).toBe(true);
+    expect(noProjectError instanceof ResolverError).toBe(true);
   });
 });

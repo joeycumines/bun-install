@@ -25,6 +25,29 @@ export class ResolverError extends Error {
   }
 }
 
+/**
+ * Thrown by {@link resolveProject} (via {@link findProjectRoot}) when no
+ * `package.json` is found in any parent directory. This is the "genuinely no
+ * local project" condition — distinct from a broken project (malformed
+ * `package.json`, missing `name`, empty workspace), which throws a plain
+ * {@link ResolverError}.
+ *
+ * Callers can distinguish the two cases: `NoProjectError` means NPM fallback
+ * is safe (the user is outside any project); a plain `ResolverError` means
+ * the local project is broken and the error should be surfaced as fatal
+ * (preventing silent supply-chain substitution).
+ *
+ * Extends {@link ResolverError} so existing `instanceof ResolverError` checks
+ * still match (backward compatible). When catching both, check
+ * `NoProjectError` BEFORE `ResolverError` (subclass-before-parent ordering).
+ */
+export class NoProjectError extends ResolverError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NoProjectError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -180,7 +203,7 @@ function findProjectRoot(startDir: string): {
     );
   }
 
-  throw new ResolverError(
+  throw new NoProjectError(
     'No package.json found in any parent directory.\n' +
       '  bun-install must be run from within (or under) a JavaScript/TypeScript\n' +
       '  project that has a package.json file.',

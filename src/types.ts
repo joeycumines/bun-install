@@ -48,6 +48,19 @@ export type PackageData = {
    * (before the local-sibling filter in src/index.ts). */
   runtimeLocalDeps: string[];
   hasBuildScript: boolean;
+  /**
+   * When `true`, this package was fetched from NPM (via
+   * {@link fetchNpmPackage} in `src/npm.ts`), not discovered in a local
+   * workspace. `buildAndPackPackages` uses this to skip the
+   * `node_modules`-stripping copy filter (`makeCopyFilter`) for NPM
+   * packages — their nested `node_modules` may contain bundled
+   * dependencies or vendored payloads that are part of the published
+   * tarball and must be preserved. Local workspace packages (where
+   * `isNpmFetched` is `undefined` or `false`) still get the filter, since
+   * their nested `node_modules` are installed dependencies (not part of
+   * the package payload).
+   */
+  isNpmFetched?: boolean;
   archivePath?: string; // Populated after packing
 };
 

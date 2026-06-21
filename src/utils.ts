@@ -335,13 +335,24 @@ export function topologicalSort(packages: Map<string, PackageData>): string[] {
  * Node.js's standard `util.parseArgs` (GNU-style option parsing).
  *
  * Supported flags:
- *   --bun       Rewrite shebangs in installed commands to use 'bun' instead
- *               of 'node' (equivalent to `bunx --bun`).
- *   --help, -h  Show usage and exit.
+ *   --bun                 Rewrite shebangs in installed commands to use 'bun'
+ *                         instead of 'node' (equivalent to `bunx --bun`).
+ *   --package <pkg>, -p <pkg>
+ *                         Select a specific package by name. Only commands
+ *                         from this package are installed. Positional args
+ *                         after the package name filter to specific commands
+ *                         from that package; if omitted, all commands from
+ *                         the package are installed. Without `--package`,
+ *                         positional args select commands by name across all
+ *                         packages.
+ *   --help, -h            Show usage and exit.
  *
  * GNU-style conventions followed (via `util.parseArgs` with `strict: true`):
- *   - Long options start with `--` (e.g. `--bun`, `--help`).
- *   - Short options start with `-` and are a single character (e.g. `-h`).
+ *   - Long options start with `--` (e.g. `--bun`, `--help`, `--package`).
+ *   - Short options start with `-` and are a single character (e.g. `-h`,
+ *     `-p`).
+ *   - String options accept their value inline (`--package=pkg`,
+ *     `-ppkg`) or as the next token (`--package pkg`, `-p pkg`).
  *   - `--` terminates option parsing: everything after is positional, even
  *     if it starts with `--`. This allows command names that legitimately
  *     start with dashes (rare but valid in npm bin names).
@@ -353,10 +364,11 @@ export function topologicalSort(packages: Map<string, PackageData>): string[] {
  *   - Options and positionals may be interspersed (e.g.
  *     `my-cli --bun other` works — both are collected correctly).
  *
- * @returns `{flags, commands}` where flags is `{bun, help}`.
+ * @returns `{flags, commands}` where flags is `{bun, help, package?}`.
+ *   `package` is `undefined` when `--package`/`-p` is not passed.
  */
 export function parseArgs(argv: string[]): {
-  flags: {bun: boolean; help: boolean};
+  flags: {bun: boolean; help: boolean; package?: string};
   commands: string[];
 } {
   let parsed;
@@ -366,6 +378,7 @@ export function parseArgs(argv: string[]): {
       options: {
         bun: {type: 'boolean'},
         help: {type: 'boolean', short: 'h'},
+        package: {type: 'string', short: 'p'},
       },
       allowPositionals: true,
       strict: true,
@@ -375,13 +388,14 @@ export function parseArgs(argv: string[]): {
     // ERR_INVALID_ARG_VALUE, etc.) with a descriptive message. We re-throw
     // via die() to add the supported-flags hint and exit with code 1.
     const msg = err instanceof Error ? err.message : String(err);
-    die(`${msg}\n  Supported flags: --bun, --help (-h)`);
+    die(`${msg}\n  Supported flags: --bun, --package/-p <pkg>, --help (-h)`);
   }
 
   return {
     flags: {
       bun: parsed.values.bun === true,
       help: parsed.values.help === true,
+      package: parsed.values.package,
     },
     commands: parsed.positionals,
   };

@@ -12,11 +12,13 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 
 import {EXIT_SIGNALS} from '../src/types.ts';
-import type {PackageData} from '../src/types.ts';
+import type {PackageData, BinEntry} from '../src/types.ts';
+import {extractBinEntries} from '../src/utils.ts';
 import {
   SIGNAL_EXIT_CODES,
   getSignalExitCode,
   confirmAction,
+  filterBinField,
   makeCopyFilter,
   pinWorkspaceDeps,
   stripDevDependencies,
@@ -483,5 +485,307 @@ describe('makeCopyFilter — empty-string guard (R9-2)', () => {
     } finally {
       rmSync(base, {recursive: true, force: true});
     }
+  });
+});
+
+// --------------------------------------------------------------------------
+// filterBinField (--package bin-field filtering for no-clobber guarantee)
+// --------------------------------------------------------------------------
+
+describe('filterBinField', () => {
+  test('object form: filters to a single selected command', () => {
+    const pkgJson: Record<string, unknown> = {
+      bin: {cmd1: './a.js', cmd2: './b.js'},
+    };
+    const selected: BinEntry[] = [{name: 'cmd1', path: './a.js'}];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(true);
+    expect(pkgJson.bin).toEqual({cmd1: './a.js'});
+  });
+
+  test('object form: filters to a subset of multiple commands', () => {
+    const pkgJson: Record<string, unknown> = {
+      bin: {a: './a.js', b: './b.js', c: './c.js'},
+    };
+    const selected: BinEntry[] = [
+      {name: 'a', path: './a.js'},
+      {name: 'c', path: './c.js'},
+    ];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(true);
+    expect(pkgJson.bin).toEqual({a: './a.js', c: './c.js'});
+  });
+
+  test('string form: converts to object form with the selected entry', () => {
+    const pkgJson: Record<string, unknown> = {bin: './cli.js'};
+    const selected: BinEntry[] = [{name: 'my-cli', path: './cli.js'}];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(true);
+    // String form is reconstructed as object form — semantically equivalent.
+    expect(pkgJson.bin).toEqual({'my-cli': './cli.js'});
+  });
+
+  test('empty selection: deletes the bin field', () => {
+    const pkgJson: Record<string, unknown> = {bin: {cmd1: './a.js'}};
+    const selected: BinEntry[] = [];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(true);
+    expect(pkgJson.bin).toBeUndefined();
+  });
+
+  test('empty selection with no bin field: returns false (no change)', () => {
+    const pkgJson: Record<string, unknown> = {name: 'pkg'};
+    const selected: BinEntry[] = [];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(false);
+    expect(pkgJson.bin).toBeUndefined();
+  });
+
+  test('no bin field: adds bin from selected entries', () => {
+    const pkgJson: Record<string, unknown> = {name: 'pkg'};
+    const selected: BinEntry[] = [{name: 'cmd1', path: './a.js'}];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(true);
+    expect(pkgJson.bin).toEqual({cmd1: './a.js'});
+  });
+
+  test('single selected from single-entry object form', () => {
+    const pkgJson: Record<string, unknown> = {bin: {only: './o.js'}};
+    const selected: BinEntry[] = [{name: 'only', path: './o.js'}];
+
+    const modified = filterBinField(pkgJson, selected);
+
+    expect(modified).toBe(true);
+    expect(pkgJson.bin).toEqual({only: './o.js'});
+  });
+
+  test('preserves other package.json fields', () => {
+    const pkgJson: Record<string, unknown> = {
+      name: 'pkg-a',
+      version: '1.0.0',
+      bin: {cmd1: './a.js', cmd2: './b.js'},
+      dependencies: {lodash: '^4.0.0'},
+    };
+    const selected: BinEntry[] = [{name: 'cmd1', path: './a.js'}];
+
+    filterBinField(pkgJson, selected);
+
+    expect(pkgJson.name).toBe('pkg-a');
+    expect(pkgJson.version).toBe('1.0.0');
+    expect(pkgJson.dependencies).toEqual({lodash: '^4.0.0'});
+    expect(pkgJson.bin).toEqual({cmd1: './a.js'});
+  });
+});
+
+// --------------------------------------------------------------------------
+// filterBinField + extractBinEntries round-trip (review-05 #2):
+// Verifies that extractBinEntries produces raw paths that filterBinField
+// faithfully preserves in the rewritten bin field — no normalization, no
+// path resolution, no ./ stripping. Closes the coverage gap where
+// filterBinField was only tested with hand-constructed BinEntry objects,
+// never with the actual output of extractBinEntries.
+// --------------------------------------------------------------------------
+
+describe('filterBinField + extractBinEntries round-trip (review-05 #2)', () => {
+  test('object form: extract then filter preserves exact paths including subdirs', () => {
+    const pkgJson: Record<string, unknown> = {
+      name: 'multi-cli',
+      bin: {
+        cmd1: './src/cmd1.js',
+        cmd2: './src/cmd2.js',
+        cmd3: './src/subdir/cmd3.js',
+      },
+    };
+    // Extract entries from the raw bin field — this is what the resolver
+    // (resolver.ts / workspace.ts) does at discovery time.
+    const entries = extractBinEntries(pkgJson.name as string, pkgJson.bin);
+    expect(entries).toHaveLength(3);
+    // Paths must be the exact raw strings from package.json.
+    expect(entries.map(e => e.path).sort()).toEqual([
+      './src/cmd1.js',
+      './src/cmd2.js',
+      './src/subdir/cmd3.js',
+    ]);
+
+    // Select only cmd1 and cmd3 — simulate --package multi-cli cmd1 cmd3.
+    const selected = entries.filter(e => ['cmd1', 'cmd3'].includes(e.name));
+    expect(selected).toHaveLength(2);
+
+    const modified = filterBinField(pkgJson, selected);
+    expect(modified).toBe(true);
+    // The rewritten bin must preserve the EXACT original paths — no
+    // normalization, no ./ stripping, no path resolution.
+    expect(pkgJson.bin).toEqual({
+      cmd1: './src/cmd1.js',
+      cmd3: './src/subdir/cmd3.js',
+    });
+  });
+
+  test('string form: extract then filter preserves exact path', () => {
+    const pkgJson: Record<string, unknown> = {
+      name: 'single-cli',
+      bin: './cli.js',
+    };
+    const entries = extractBinEntries(pkgJson.name as string, pkgJson.bin);
+    expect(entries).toHaveLength(1);
+    // String form: name derived from package name, path is the raw string.
+    expect(entries[0].name).toBe('single-cli');
+    expect(entries[0].path).toBe('./cli.js');
+
+    // Select the single entry — simulate --package single-cli (all commands).
+    const modified = filterBinField(pkgJson, entries);
+    expect(modified).toBe(true);
+    // Reconstructed as object form — semantically equivalent, path preserved.
+    expect(pkgJson.bin).toEqual({'single-cli': './cli.js'});
+  });
+
+  test('scoped package: extract then filter preserves paths and uses object keys', () => {
+    const pkgJson: Record<string, unknown> = {
+      name: '@scope/cli',
+      bin: {tool: './tool.js', helper: './helper.js'},
+    };
+    const entries = extractBinEntries(pkgJson.name as string, pkgJson.bin);
+    expect(entries).toHaveLength(2);
+    // Object form: names are the object keys, not the package name.
+    expect(entries.map(e => e.name).sort()).toEqual(['helper', 'tool']);
+    expect(entries.map(e => e.path).sort()).toEqual([
+      './helper.js',
+      './tool.js',
+    ]);
+
+    // Select only tool — simulate --package @scope/cli tool.
+    const selected = entries.filter(e => e.name === 'tool');
+    expect(selected).toHaveLength(1);
+
+    const modified = filterBinField(pkgJson, selected);
+    expect(modified).toBe(true);
+    expect(pkgJson.bin).toEqual({tool: './tool.js'});
+  });
+});
+
+// --------------------------------------------------------------------------
+// isNpmFetched copy-filter behavior (review-071e6d2 #2):
+// NPM-fetched packages must preserve nested node_modules (bundled deps).
+// Local workspace packages must strip them (installed deps, not payload).
+// buildAndPackPackages uses: pkg.isNpmFetched ? undefined : makeCopyFilter(pkg.dir)
+// --------------------------------------------------------------------------
+
+describe('isNpmFetched copy-filter behavior (review-071e6d2 #2)', () => {
+  test('cpSync without filter preserves nested node_modules (NPM package path)', () => {
+    // Simulates the isNpmFetched: true path in buildAndPackPackages.
+    // No filter is passed to cpSync, so everything is copied — including
+    // nested node_modules (bundled deps, vendored payloads).
+    const src = mkdtempSync(join(tmpdir(), 'npm-cf-src-'));
+    const dest = mkdtempSync(join(tmpdir(), 'npm-cf-dest-'));
+    try {
+      writeFileSync(
+        join(src, 'package.json'),
+        '{"name":"pkg","version":"1.0.0"}',
+      );
+      writeFileSync(join(src, 'cli.js'), 'console.log("hi")');
+      mkdirSync(join(src, 'node_modules', 'bundled-dep'), {recursive: true});
+      writeFileSync(
+        join(src, 'node_modules', 'bundled-dep', 'package.json'),
+        '{"name":"bundled-dep"}',
+      );
+      writeFileSync(
+        join(src, 'node_modules', 'bundled-dep', 'index.js'),
+        'module.exports = {}',
+      );
+
+      // Without filter (isNpmFetched: true)
+      cpSync(src, dest, {recursive: true});
+
+      // Regular files are present
+      expect(readFileSync(join(dest, 'package.json'), 'utf-8')).toBe(
+        '{"name":"pkg","version":"1.0.0"}',
+      );
+      expect(readFileSync(join(dest, 'cli.js'), 'utf-8')).toBe(
+        'console.log("hi")',
+      );
+      // Nested node_modules IS preserved (the fix)
+      expect(
+        readFileSync(
+          join(dest, 'node_modules', 'bundled-dep', 'package.json'),
+          'utf-8',
+        ),
+      ).toBe('{"name":"bundled-dep"}');
+      expect(
+        readFileSync(
+          join(dest, 'node_modules', 'bundled-dep', 'index.js'),
+          'utf-8',
+        ),
+      ).toBe('module.exports = {}');
+    } finally {
+      rmSync(src, {recursive: true, force: true});
+      rmSync(dest, {recursive: true, force: true});
+    }
+  });
+
+  test('cpSync with makeCopyFilter strips nested node_modules (local package path)', () => {
+    // Simulates the isNpmFetched: false/undefined path in buildAndPackPackages.
+    // makeCopyFilter strips nested node_modules (installed deps, not payload).
+    const src = mkdtempSync(join(tmpdir(), 'local-cf-src-'));
+    const dest = mkdtempSync(join(tmpdir(), 'local-cf-dest-'));
+    try {
+      writeFileSync(
+        join(src, 'package.json'),
+        '{"name":"pkg","version":"1.0.0"}',
+      );
+      writeFileSync(join(src, 'cli.js'), 'console.log("hi")');
+      mkdirSync(join(src, 'node_modules', 'installed-dep'), {recursive: true});
+      writeFileSync(
+        join(src, 'node_modules', 'installed-dep', 'package.json'),
+        '{"name":"installed-dep"}',
+      );
+
+      // With filter (isNpmFetched: false/undefined — local package)
+      cpSync(src, dest, {recursive: true, filter: makeCopyFilter(src)});
+
+      // Regular files are present
+      expect(readFileSync(join(dest, 'package.json'), 'utf-8')).toBe(
+        '{"name":"pkg","version":"1.0.0"}',
+      );
+      expect(readFileSync(join(dest, 'cli.js'), 'utf-8')).toBe(
+        'console.log("hi")',
+      );
+      // Nested node_modules is stripped (existing behavior for local packages)
+      expect(() =>
+        readFileSync(
+          join(dest, 'node_modules', 'installed-dep', 'package.json'),
+        ),
+      ).toThrow();
+    } finally {
+      rmSync(src, {recursive: true, force: true});
+      rmSync(dest, {recursive: true, force: true});
+    }
+  });
+
+  test('PackageData.isNpmFetched is optional (backward compatible)', () => {
+    // Existing PackageData objects (local packages) don't set isNpmFetched.
+    // It's undefined, which is falsy — makeCopyFilter is applied.
+    // This test verifies the field is optional and doesn't break existing code.
+    const pkg: PackageData = {
+      name: 'local-pkg',
+      dir: '/dev/null',
+      binEntries: [],
+      localDeps: [],
+      runtimeLocalDeps: [],
+      hasBuildScript: false,
+    };
+    expect(pkg.isNpmFetched).toBeUndefined();
+    expect(pkg.isNpmFetched ? true : false).toBe(false);
   });
 });

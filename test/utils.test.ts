@@ -248,6 +248,78 @@ describe('parseArgs', () => {
     const {flags} = parseArgs(['--bun', '--bun']);
     expect(flags.bun).toBe(true);
   });
+
+  // ------------------------------------------------------------------------
+  // --package / -p (string option with short alias)
+  // ------------------------------------------------------------------------
+
+  test('parses --package <pkg>', () => {
+    const {flags, commands} = parseArgs(['--package', 'my-cli']);
+    expect(flags.package).toBe('my-cli');
+    expect(flags.bun).toBe(false);
+    expect(flags.help).toBe(false);
+    expect(commands).toEqual([]);
+  });
+
+  test('parses -p <pkg> (short form)', () => {
+    const {flags, commands} = parseArgs(['-p', 'my-cli']);
+    expect(flags.package).toBe('my-cli');
+    expect(commands).toEqual([]);
+  });
+
+  test('parses --package=<pkg> (inline form)', () => {
+    const {flags} = parseArgs(['--package=my-cli']);
+    expect(flags.package).toBe('my-cli');
+  });
+
+  test('parses -p<pkg> (attached short form)', () => {
+    const {flags} = parseArgs(['-pmy-cli']);
+    expect(flags.package).toBe('my-cli');
+  });
+
+  test('parses --package <pkg> with commands', () => {
+    const {flags, commands} = parseArgs([
+      '--package',
+      'my-cli',
+      'cmd1',
+      'cmd2',
+    ]);
+    expect(flags.package).toBe('my-cli');
+    expect(commands).toEqual(['cmd1', 'cmd2']);
+  });
+
+  test('combines --bun and --package', () => {
+    const {flags} = parseArgs(['--bun', '--package', 'my-cli']);
+    expect(flags.bun).toBe(true);
+    expect(flags.package).toBe('my-cli');
+  });
+
+  test('combines --package and commands after -- separator', () => {
+    const {flags, commands} = parseArgs([
+      '--package',
+      'my-cli',
+      '--',
+      '--weird-cmd',
+    ]);
+    expect(flags.package).toBe('my-cli');
+    expect(commands).toEqual(['--weird-cmd']);
+  });
+
+  test('package is undefined when --package is not passed', () => {
+    const {flags} = parseArgs(['my-cli', 'other']);
+    expect(flags.package).toBeUndefined();
+  });
+
+  test('package is undefined with only --bun', () => {
+    const {flags} = parseArgs(['--bun', 'cmd1']);
+    expect(flags.package).toBeUndefined();
+    expect(flags.bun).toBe(true);
+  });
+
+  test('package is undefined on empty argv', () => {
+    const {flags} = parseArgs([]);
+    expect(flags.package).toBeUndefined();
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -287,6 +359,8 @@ describe('parseArgs — die path (unknown flag)', () => {
     expect(code).toBe(1);
     expect(stderr).toMatch(/Unknown option/i);
     expect(stderr).toMatch(/Supported flags/i);
+    // The supported-flags hint must mention --package/-p.
+    expect(stderr).toMatch(/--package/i);
   });
 
   test('dies on unknown short flag -x', () => {
@@ -295,11 +369,45 @@ describe('parseArgs — die path (unknown flag)', () => {
     expect(stderr).toMatch(/Unknown option|ERR_PARSE_ARGS/i);
   });
 
+  test('dies when --package is passed without a value', () => {
+    // util.parseArgs requires a value for string-type options.
+    const {code} = runIsolated("parseArgs(['--package']);\n");
+    expect(code).toBe(1);
+  });
+
   test('does NOT die on -- separator', () => {
     const {code} = runIsolated(
       "const r = parseArgs(['--', '--unknown']);\n" +
         "if (r.commands[0] !== '--unknown') throw new Error('fail');\n",
     );
     expect(code).toBe(0);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Empty --package guard (review-02 #2): main() rejects --package= and -p ''
+// --------------------------------------------------------------------------
+
+describe('empty --package guard (review-02 #2)', () => {
+  const INDEX_PATH = join(import.meta.dir, '..', 'src', 'index.ts');
+
+  test('dies on --package= (empty inline value)', () => {
+    const proc = Bun.spawnSync(['bun', INDEX_PATH, '--package='], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: process.env as Record<string, string>,
+    });
+    expect(proc.exitCode).toBe(1);
+    const stderr = new TextDecoder().decode(proc.stderr);
+    expect(stderr).toMatch(/non-empty/i);
+  });
+
+  test('dies on -p "" (empty short value)', () => {
+    const proc = Bun.spawnSync(['bun', INDEX_PATH, '-p', ''], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: process.env as Record<string, string>,
+    });
+    expect(proc.exitCode).toBe(1);
+    const stderr = new TextDecoder().decode(proc.stderr);
+    expect(stderr).toMatch(/non-empty/i);
   });
 });
