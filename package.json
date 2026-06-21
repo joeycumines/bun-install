@@ -1,6 +1,6 @@
 {
   "name": "bun-install",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Install CLI commands from a local workspace or an NPM package into Bun's global package store. Supports command selection and Bun runtime override. Excellent for dev builds of MCPs and other tools. Automatically resolves dependencies within your project's workspace.",
   "type": "module",
   "bin": {
